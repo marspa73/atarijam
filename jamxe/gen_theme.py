@@ -58,8 +58,6 @@ def gen(datafile, outfile='theme.inc'):
     sub_has_prompt = any(sub.lower().startswith(('try:', 'ask:', 'more:')) for sub in subs)
     if sub_has_prompt:
         hint_lines = []
-        if len(hint_words) > 4:
-            hint_lines.append('More: ' + ' '.join(hint_words[4:8]))
     else:
         hint_lines = ['Ask: ' + ' '.join(hint_words[:4])]
         if len(hint_words) > 4:

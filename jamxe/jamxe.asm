@@ -105,6 +105,10 @@ dream_chain: .res 1
 dream_color: .res 1
 cur_bank: .res 1
 nmien_save: .res 1
+dirty_count: .res 1
+dirty_off:  .res 16       ; byte offset in W1 row (0-127) per delta
+dirty_nib:  .res 16       ; nibble position (0-3)
+dirty_sgn:  .res 16       ; 0=add feature, 1=subtract feature
 nz_count = $2200
 nz_off   = $2201    ; 128 byte offsets
 nz_nib   = $2281    ; 128 nibble/pair flags
@@ -1970,18 +1974,47 @@ stop_sound:
 
 
 ; =====================================================
-; INCREMENTAL L1 over cached preact
-; Only the live delta columns are applied on token 1+:
-; - add newest trigram bucket
-; - add live bag bucket for newest char
-; - remove previous suffix features
-; - add current suffix features
-; - add answer-bag bucket for newest char
-; Then rebuild hidbuf via ReLU from PREACT_RAM.
+; INCREMENTAL L1 over cached preact (bank-major)
+; Collects all live deltas into dirty table, then applies
+; them in a single sweep across all 4 banks.
 ; =====================================================
 .segment "HICODE"
+
+; --- Dirty table helpers ---
+; Input: tmp = byte offset in W1 row (0-127), nibble_sel = nibble position (0-3)
+note_dirty_add:
+        ldy dirty_count
+        cpy #16
+        bcs @nda_done
+        lda tmp
+        sta dirty_off,y
+        lda nibble_sel
+        sta dirty_nib,y
+        lda #0
+        sta dirty_sgn,y
+        inc dirty_count
+@nda_done:
+        rts
+
+note_dirty_sub:
+        ldy dirty_count
+        cpy #16
+        bcs @nds_done
+        lda tmp
+        sta dirty_off,y
+        lda nibble_sel
+        sta dirty_nib,y
+        lda #1
+        sta dirty_sgn,y
+        inc dirty_count
+@nds_done:
+        rts
+
 l1_incremental:
-        ; New trigram ending at the newest char.
+        lda #0
+        sta dirty_count
+
+        ; 1. New trigram ending at the newest char.
         lda ctxlen
         cmp #3
         bcc @li_no_tri
@@ -1995,7 +2028,7 @@ l1_incremental:
         sta tc1
         lda ctx+2,x
         sta tc2
-        jsr tri_one          ; updates last_bucket; ihash scratch side effect is harmless
+        jsr tri_one
         lda last_bucket
         lsr
         lsr
@@ -2003,11 +2036,10 @@ l1_incremental:
         lda last_bucket
         and #3
         sta nibble_sel
-        lda #0
-        sta ninh            ; add
-        jsr l1_apply_delta_col
+        jsr note_dirty_add
 @li_no_tri:
-        ; New live bag bucket for the newest char (ihash[192..223]).
+
+        ; 2. New live bag bucket (ihash[192..223]).
         ldx ctxlen
         dex
         lda ctx,x
@@ -2021,16 +2053,14 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #0
-        sta ninh
-        jsr l1_apply_delta_col
+        jsr note_dirty_add
 
-        ; Remove suffix features for old answer length (gencnt-1).
+        ; 3. Remove old suffix features (gencnt-1).
         lda gencnt
         cmp #2
-        bcs @li_old_sfx
+        bcs @li_has_old_sfx
         jmp @li_no_old_sfx
-@li_old_sfx:
+@li_has_old_sfx:
         ; old last char = ctx[len-2]
         ldx ctxlen
         dex
@@ -2046,9 +2076,7 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #1
-        sta ninh           ; subtract
-        jsr l1_apply_delta_col
+        jsr note_dirty_sub
         ; old length bucket = 248 + ((gencnt-1) & 7)
         lda gencnt
         sec
@@ -2063,13 +2091,12 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #1
-        sta ninh
-        jsr l1_apply_delta_col
-        ; old prev+delta exist only when old answer len >= 2 => gencnt >= 3
+        jsr note_dirty_sub
+        ; old prev+delta only when gencnt >= 3
         lda gencnt
         cmp #3
         bcc @li_no_old_sfx
+        ; old prev char = ctx[len-3]
         ldx ctxlen
         dex
         dex
@@ -2085,18 +2112,17 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #1
-        sta ninh
-        jsr l1_apply_delta_col
+        jsr note_dirty_sub
+        ; old delta = (ctx[len-2] - ctx[len-3]) & 7
         ldx ctxlen
         dex
         dex
         lda ctx,x
-        sta tc0            ; old last
+        sta tc0
         dex
         lda tc0
         sec
-        sbc ctx,x          ; old last - old prev
+        sbc ctx,x
         and #7
         sta act
         lsr
@@ -2107,11 +2133,10 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #1
-        sta ninh
-        jsr l1_apply_delta_col
+        jsr note_dirty_sub
 @li_no_old_sfx:
-        ; Add current suffix features for new answer length gencnt.
+
+        ; 4. Add current suffix features for gencnt.
         ldx ctxlen
         dex
         lda ctx,x
@@ -2125,9 +2150,8 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #0
-        sta ninh
-        jsr l1_apply_delta_col
+        jsr note_dirty_add
+        ; new length bucket
         lda gencnt
         and #7
         sta act
@@ -2139,9 +2163,8 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #0
-        sta ninh
-        jsr l1_apply_delta_col
+        jsr note_dirty_add
+        ; new prev+delta only when gencnt >= 2
         lda gencnt
         cmp #2
         bcc @li_no_new_sfx2
@@ -2159,17 +2182,16 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #0
-        sta ninh
-        jsr l1_apply_delta_col
+        jsr note_dirty_add
+        ; new delta = (ctx[len-1] - ctx[len-2]) & 7
         ldx ctxlen
         dex
         lda ctx,x
-        sta tc0            ; new last
+        sta tc0
         dex
         lda tc0
         sec
-        sbc ctx,x          ; new last - new prev
+        sbc ctx,x
         and #7
         sta act
         lsr
@@ -2180,11 +2202,10 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #0
-        sta ninh
-        jsr l1_apply_delta_col
+        jsr note_dirty_add
 @li_no_new_sfx2:
-        ; Add answer-only bag bucket (ihash[416..447]) for newest char.
+
+        ; 5. Answer-only bag bucket (ihash[416..447]).
         ldx ctxlen
         dex
         lda ctx,x
@@ -2198,75 +2219,169 @@ l1_incremental:
         lda act
         and #3
         sta nibble_sel
-        lda #0
-        sta ninh
-        jsr l1_apply_delta_col
+        jsr note_dirty_add
+
+        ; === Normalize: cancel +/- pairs hitting same column ===
+        jsr normalize_dirty
+        ; === Bank-major sweep: apply all deltas in one pass ===
+        jsr l1_apply_all_deltas
         jmp relu_build_hid_sparse
 
-l1_apply_delta_col:
+; =====================================================
+; Normalize dirty table: cancel +/- pairs on same column.
+; Marks cancelled entries by setting dirty_off = $FF.
+; Then compacts the table removing $FF entries.
+; =====================================================
+normalize_dirty:
+        lda dirty_count
+        cmp #2
+        bcc @nd_done         ; 0 or 1 entries, nothing to cancel
+        ldx #0
+@nd_i:  cpx dirty_count
+        bcs @nd_compact
+        lda dirty_off,x
+        cmp #$FF
+        beq @nd_inext        ; already cancelled
+        sta tmp              ; tmp = off[i]
+        lda dirty_nib,x
+        sta nibble_sel       ; nibble_sel = nib[i]
+        lda dirty_sgn,x
+        sta ninh             ; ninh = sgn[i]
+        ; Search for opposite-sign match in entries after i
+        txa
+        tay
+        iny
+@nd_j:  cpy dirty_count
+        bcs @nd_inext
+        lda dirty_off,y
+        cmp #$FF
+        beq @nd_jnext
+        cmp tmp
+        bne @nd_jnext
+        lda dirty_nib,y
+        cmp nibble_sel
+        bne @nd_jnext
+        lda dirty_sgn,y
+        cmp ninh
+        beq @nd_jnext        ; same sign = not a cancel pair
+        ; Found cancel pair: mark both as $FF
+        lda #$FF
+        sta dirty_off,x
+        sta dirty_off,y
+        jmp @nd_inext        ; i is cancelled, move on
+@nd_jnext:
+        iny
+        jmp @nd_j
+@nd_inext:
+        inx
+        jmp @nd_i
+@nd_compact:
+        ; Compact: remove $FF entries by shifting remaining ones down
+        ldx #0               ; read index
+        ldy #0               ; write index
+@nd_cp: cpx dirty_count
+        bcs @nd_cp_done
+        lda dirty_off,x
+        cmp #$FF
+        beq @nd_cp_skip
+        ; Copy entry x to position y
+        sta dirty_off,y
+        lda dirty_nib,x
+        sta dirty_nib,y
+        lda dirty_sgn,x
+        sta dirty_sgn,y
+        iny
+@nd_cp_skip:
+        inx
+        jmp @nd_cp
+@nd_cp_done:
+        sty dirty_count
+@nd_done:
+        rts
+
+; =====================================================
+; Bank-major multi-delta apply
+; For each bank (4), sweep all 128 rows. Per row, apply
+; every dirty column. Reduces bank switches from ~52 to 4.
+; =====================================================
+l1_apply_all_deltas:
         lda #0
         sta cur_bank
-@ld_bank:
+@ad_bank:
         lda cur_bank
         asl
         asl
         ora #PORTB_CPU_EXT0
         sta PORTB
-        lda #<BANK_WIN
-        clc
-        adc tmp
-        sta wptr
-        lda #>BANK_WIN
-        adc #0
-        sta wptr+1
+        ; Set up preact pointer for this bank
         ldx cur_bank
         lda bank_pre_lo,x
         sta aptr_b
         lda bank_pre_hi,x
         sta aptr_b+1
+        ; wptr = base of bank window (advances by STRIDE per row)
+        lda #<BANK_WIN
+        sta wptr
+        lda #>BANK_WIN
+        sta wptr+1
         lda #ROWS_PER_BANK
         sta ocnt
-@ld_row:
-        ldy #0
+@ad_row:
+        ; For this row, iterate over all dirty columns
+        ldx #0
+@ad_col:
+        cpx dirty_count
+        bne @ad_col_go
+        jmp @ad_row_done
+@ad_col_go:
+        stx wcnt             ; save dirty index
+        ; Load weight byte at wptr + dirty_off[x]
+        ldy dirty_off,x
         lda (wptr),y
-        bne @ld_havew
-        jmp @ld_next
-@ld_havew:
+        bne @ad_col_havew
+        jmp @ad_col_next     ; zero byte = skip
+@ad_col_havew:
         sta wbyte
-        lda nibble_sel
-        beq @ld_p0
+        ; Extract 2-bit code at nibble position dirty_nib[x]
+        ldx wcnt
+        lda dirty_nib,x
+        beq @ad_n0
         cmp #1
-        beq @ld_p1
+        beq @ad_n1
         cmp #2
-        beq @ld_p2
+        beq @ad_n2
         ldy wbyte
         lda twob3,y
-        jmp @ld_got
-@ld_p2: ldy wbyte
+        jmp @ad_ngot
+@ad_n2: ldy wbyte
         lda twob2,y
-        jmp @ld_got
-@ld_p1: ldy wbyte
+        jmp @ad_ngot
+@ad_n1: ldy wbyte
         lda twob1,y
-        jmp @ld_got
-@ld_p0: lda wbyte
+        jmp @ad_ngot
+@ad_n0: lda wbyte
         and #3
-@ld_got:
-        tay
-        beq @ld_next
-        lda ninh
-        beq @ld_addf
+@ad_ngot:
+        tay                  ; Y = 2-bit code (0-3)
+        beq @ad_col_next     ; code 0 = no weight, skip
+        ; Determine add or subtract based on dirty_sgn + code
+        ldx wcnt
+        lda dirty_sgn,x
+        beq @ad_fwd
+        ; subtract mode: reverse signs (code 1→+1, 2→-1, 3→+2)
         cpy #1
-        beq @ld_add1
+        beq @ad_add1
         cpy #2
-        beq @ld_sub1
-        jmp @ld_add2
-@ld_addf:
+        beq @ad_sub1
+        jmp @ad_add2
+@ad_fwd:
+        ; add mode: normal signs (code 1→-1, 2→+1, 3→-2)
         cpy #1
-        beq @ld_sub1
+        beq @ad_sub1
         cpy #2
-        beq @ld_add1
+        beq @ad_add1
         ; code 3 = -2
-@ld_sub2:
+@ad_sub2:
         ldy #0
         sec
         lda (aptr_b),y
@@ -2276,8 +2391,8 @@ l1_apply_delta_col:
         lda (aptr_b),y
         sbc #0
         sta (aptr_b),y
-        jmp @ld_next
-@ld_add2:
+        jmp @ad_col_next
+@ad_add2:
         ldy #0
         clc
         lda (aptr_b),y
@@ -2287,8 +2402,8 @@ l1_apply_delta_col:
         lda (aptr_b),y
         adc #0
         sta (aptr_b),y
-        jmp @ld_next
-@ld_sub1:
+        jmp @ad_col_next
+@ad_sub1:
         ldy #0
         sec
         lda (aptr_b),y
@@ -2298,8 +2413,8 @@ l1_apply_delta_col:
         lda (aptr_b),y
         sbc #0
         sta (aptr_b),y
-        jmp @ld_next
-@ld_add1:
+        jmp @ad_col_next
+@ad_add1:
         ldy #0
         clc
         lda (aptr_b),y
@@ -2309,14 +2424,20 @@ l1_apply_delta_col:
         lda (aptr_b),y
         adc #0
         sta (aptr_b),y
-@ld_next:
+@ad_col_next:
+        ldx wcnt
+        inx
+        jmp @ad_col
+@ad_row_done:
+        ; Advance preact pointer by 2
         clc
         lda aptr_b
         adc #2
         sta aptr_b
-        bcc @ld_no_p
+        bcc @ad_np
         inc aptr_b+1
-@ld_no_p:
+@ad_np:
+        ; Advance wptr by STRIDE (128)
         clc
         lda wptr
         adc #$80
@@ -2325,17 +2446,17 @@ l1_apply_delta_col:
         adc #0
         sta wptr+1
         dec ocnt
-        beq @ld_bank_done
-        jmp @ld_row
-@ld_bank_done:
+        beq @ad_bank_done
+        jmp @ad_row
+@ad_bank_done:
         lda #PORTB_MAIN
         sta PORTB
         inc cur_bank
         lda cur_bank
         cmp #N_BANKS
-        beq @ld_done
-        jmp @ld_bank
-@ld_done:
+        beq @ad_done
+        jmp @ad_bank
+@ad_done:
         rts
 
 relu_build_hid_sparse:
