@@ -24,7 +24,8 @@ Each project folder contains:
 - a portable `build.py`
 - a trainer script for optional retraining
 
-  <img width="1094" height="811" alt="image" src="https://github.com/user-attachments/assets/b154509c-1786-4040-ace2-f56770bcd78a" />
+<img width="1267" height="1206" alt="image" src="https://github.com/user-attachments/assets/62e499a8-106a-4361-97d5-029cb16daa9d" />
+
 
 
 ## Requirements
