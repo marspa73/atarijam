@@ -74,6 +74,8 @@ hint_mode: .res 1    ; 1=running neural hint (answer->query)
 ctx:    .res 80
 thash:  .res 96
 hidbuf: .res 64
+frozen_thash: .res 96
+frozen_len: .res 1      ; ctxlen at freeze time (query+SEP length)
 obuf:   .res 90
 nz_count: .res 1
 nz_idx:  .res 48    ; input index (0-95 or 0-127)
@@ -156,6 +158,8 @@ got_input:
         inx
         stx ctxlen
 
+        jsr thash_init_frozen   ; freeze query+SEP hash for incremental L1
+
         ; Context decay: first turn = full clear, then decay
         lda first_turn
         beq @ctx_decay
@@ -203,8 +207,14 @@ got_input:
         sta answer_ok
 
 gen_loop:
-        jsr thash_clear
-        jsr thash_hash
+        ; === INCREMENTAL HASH (frozen + live delta) ===
+        ldx #0
+@copyf: lda frozen_thash,x
+        sta thash,x
+        inx
+        cpx #96
+        bne @copyf
+        jsr thash_add_live_delta
 
         ; === L1: 1-bit sparse ===
         jsr build_nz_thash
@@ -772,6 +782,192 @@ idle_chatter:
 ; =====================================================
 ; HASH
 ; =====================================================
+; =====================================================
+; TRIGRAM HASH SUBROUTINE (shared by full hash and incremental)
+; Input: tc0, tc1, tc2
+; Output: increments thash[idx] where idx = (tc0*31 + tc1*7 + tc2) & $3F
+; =====================================================
+tri_one:
+        lda tc0
+        asl
+        asl
+        asl
+        asl
+        asl
+        sec
+        sbc tc0
+        sta acc_lo
+        lda tc1
+        asl
+        asl
+        asl
+        sec
+        sbc tc1
+        clc
+        adc acc_lo
+        clc
+        adc tc2
+        and #$3F
+        tax
+        inc thash,x
+        rts
+
+; Same as tri_one but increments frozen_thash instead of thash
+tri_one_frozen:
+        lda tc0
+        asl
+        asl
+        asl
+        asl
+        asl
+        sec
+        sbc tc0
+        sta acc_lo
+        lda tc1
+        asl
+        asl
+        asl
+        sec
+        sbc tc1
+        clc
+        adc acc_lo
+        clc
+        adc tc2
+        and #$3F
+        tax
+        inc frozen_thash,x
+        rts
+
+; =====================================================
+; INCREMENTAL HASH - FROZEN + LIVE DELTA (bit-exact)
+; =====================================================
+
+; Compute frozen_thash from query+SEP (called once after got_input)
+thash_init_frozen:
+        lda ctxlen
+        sta frozen_len          ; remember query+SEP length
+        ldx #0
+        lda #0
+@clr:   sta frozen_thash,x
+        inx
+        cpx #96
+        bne @clr
+
+        ; Trigrams over query+SEP
+        lda ctxlen
+        cmp #3
+        bcc @bagq
+        ldx #0
+@loop:  lda ctx,x
+        sta tc0
+        lda ctx+1,x
+        sta tc1
+        lda ctx+2,x
+        sta tc2
+        txa
+        pha
+        jsr tri_one_frozen
+        pla
+        tax
+        inx
+        txa
+        clc
+        adc #2
+        cmp ctxlen
+        bcs @bagq
+        txa
+        tax
+        jmp @loop
+
+        ; Bag-of-chars over query+SEP
+@bagq:  ldx #0
+@bag:   cpx ctxlen
+        beq @bagdone
+        lda ctx,x
+        and #$0F
+        tay
+        lda frozen_thash+64,y
+        cmp #255
+        beq @bsat
+        clc
+        adc #1
+        sta frozen_thash+64,y
+@bsat:  inx
+        jmp @bag
+@bagdone:
+        rts
+
+; Add all answer-portion contributions on top of thash
+; (thash already has frozen copy; ctxlen includes answer chars)
+thash_add_live_delta:
+        ; Trigrams: iterate from (frozen_len - 2) to (ctxlen - 3)
+        ; These are all trigrams that involve at least one answer char
+        lda ctxlen
+        cmp #3
+        bcc @bag_start
+        lda frozen_len
+        sec
+        sbc #2
+        bcs @tri_idx
+        lda #0              ; clamp to 0
+@tri_idx:
+        tax
+@tri_loop:
+        txa
+        clc
+        adc #2
+        cmp ctxlen
+        bcs @bag_start      ; i+2 >= ctxlen => done
+        lda ctx,x
+        sta tc0
+        lda ctx+1,x
+        sta tc1
+        lda ctx+2,x
+        sta tc2
+        txa
+        pha
+        jsr tri_one
+        pla
+        tax
+        inx
+        jmp @tri_loop
+
+        ; Bag: add entries for all answer chars (frozen_len to ctxlen-1)
+@bag_start:
+        ldx frozen_len
+@bag:   cpx ctxlen
+        beq @bag_done
+        lda ctx,x
+        and #$0F
+        tay
+        lda thash+64,y
+        cmp #255
+        beq @bsat2
+        clc
+        adc #1
+        sta thash+64,y
+@bsat2: inx
+        jmp @bag
+@bag_done:
+        ; Suffix features (gencnt-dependent)
+        lda gencnt
+        beq @sfxd
+        ldx ctxlen
+        dex
+        lda ctx,x
+        and #7
+        clc
+        adc #80
+        tax
+        inc thash,x
+        lda gencnt
+        and #7
+        clc
+        adc #88
+        tax
+        inc thash,x
+@sfxd:  rts
+
 thash_clear:
         ; Full clear (first turn or dream)
         ldx #0
@@ -806,29 +1002,7 @@ thash_hash:
         sta tc2
         txa
         pha
-        ; h = (tc0*31 + tc1*7 + tc2) & $3F
-        lda tc0
-        asl
-        asl
-        asl
-        asl
-        asl
-        sec
-        sbc tc0
-        sta acc_lo
-        lda tc1
-        asl
-        asl
-        asl
-        sec
-        sbc tc1
-        clc
-        adc acc_lo
-        clc
-        adc tc2
-        and #$3F
-        tax
-        inc thash,x
+        jsr tri_one
         pla
         tax
         inx
