@@ -12,6 +12,9 @@ Three Atari language models, ready to build and ready to run:
 - `jam`: compact standalone JAM, about `18 KB` brain
 - `jamxe`: bank-switched Atari 130XE model, about `77.7 KB` brain
 
+ <img width="2131" height="1538" alt="image" src="https://github.com/user-attachments/assets/db6cf9ef-51df-492a-aa3c-05ea9e4658b1" />
+
+
 Each project folder contains:
 
 - source `.asm`
@@ -20,6 +23,9 @@ Each project folder contains:
 - a prebuilt `.xex` in `dist/`
 - a portable `build.py`
 - a trainer script for optional retraining
+
+  <img width="1094" height="811" alt="image" src="https://github.com/user-attachments/assets/b154509c-1786-4040-ace2-f56770bcd78a" />
+
 
 ## Requirements
 
