@@ -6,12 +6,14 @@ Who knows but it is a fully generative, deterministic language model, powered by
 Real silicon intelligence in 2-80 kilobytes, running on a 1979 Atari 800.
 
 
-Four Atari language models, ready to build and ready to run:
+Six Atari language models, ready to build and ready to run:
 
 - `picojam`: ultra-tiny 8-bit proof, about `1.6 KB` brain
 - `jam`: compact standalone JAM, about `18 KB` brain
 - `jamxe`: bank-switched Atari 130XE model, about `76 KB` brain
 - `jamkid`: same 130XE runtime, kid personality
+- `picosam`: picojam + experimental POKEY tone output
+- `jamsam`: jam + experimental POKEY tone output
 
  <img width="2131" height="1538" alt="image" src="https://github.com/user-attachments/assets/db6cf9ef-51df-492a-aa3c-05ea9e4658b1" />
 
@@ -50,7 +52,7 @@ The build scripts try `ca65/ld65` from:
 
 ## Quick Start
 
-Build all four from the shipped weights:
+Build all from the shipped weights:
 
 ```powershell
 python build_all.py
@@ -63,6 +65,8 @@ python picojam\build.py
 python jam\build.py
 python jamxe\build.py
 python jamkid\build.py
+python picosam\build.py
+python jamsam\build.py
 ```
 
 Retrain and rebuild:
@@ -74,6 +78,8 @@ python jamxe\build.py --train
 python jamkid\build.py --train
 ```
 
+The SAM variants (`picosam`, `jamsam`) share training data with their base models.
+
 ## Included Binaries
 
 - [picojam/dist/picojam.xex](picojam/dist/picojam.xex)
@@ -82,6 +88,8 @@ python jamkid\build.py --train
 - [jamxe/dist/jamxe.atr](jamxe/dist/jamxe.atr) (SIO2SD)
 - [jamkid/dist/jamkid.xex](jamkid/dist/jamkid.xex)
 - [jamkid/dist/jamkid.atr](jamkid/dist/jamkid.atr) (SIO2SD)
+- [picosam/dist/picosam.xex](picosam/dist/picosam.xex)
+- [jamsam/dist/jamsam.xex](jamsam/dist/jamsam.xex)
 
 ## SIO2SD Notes
 
@@ -96,7 +104,7 @@ The `.atr` images boot directly from the SD card. Setup:
 
 ### `picojam`
 
-Smallest of the four. Fast, weird, and fun.
+Smallest of them all. Fast, weird, and fun.
 
 ### `jam`
 
@@ -112,6 +120,16 @@ L1 with bank-major delta normalization.
 
 Same 130XE runtime as `jamxe`, different personality.
 A small, curious, playful machine child. Shares ASM and packer with `jamxe/`.
+
+### `picosam`
+
+Experimental: picojam with POKEY tone output. Each generated character
+produces a formant-like tone via POKEY. Proof of concept, not real speech.
+
+### `jamsam`
+
+Experimental: jam with POKEY tone output on channels 2-4.
+Channel 1 stays free for the thinking sound. Same proof of concept as picosam.
 
 
 Copyright (c) 2026 jam.ag / Marek Spanel
